@@ -3,6 +3,7 @@
 import ast
 import configparser
 import hashlib
+import json
 import os
 import re
 import string
@@ -11,15 +12,18 @@ from subprocess import PIPE
 import sys
 
 from includetree import includeTree
-from helper import loadConfig, annotateDTS
+from helper import loadConfig, annotateDTS, ConfigHelper
 from merge import mergeDts
 
 from PyQt6.QtGui import QColor, QDesktopServices
-from PyQt6 import QtCore, QtGui, QtWidgets
-from PyQt6.QtWidgets import QApplication, QMainWindow, QFileDialog, QDialog, QHeaderView, QMessageBox
+from PyQt6 import QtCore, QtGui, QtWidgets, uic
+from PyQt6.QtWidgets import QApplication, QMainWindow, QFileDialog, QDialog, QHeaderView, QMessageBox, QTreeWidgetItem, \
+    QWidget
 from PyQt6.uic import loadUi
 
 import qdarktheme
+
+from queue import Queue
 
 DELETED_TAG = "__[|>*DELETED*<|]__"
 
@@ -27,6 +31,11 @@ def getTopLevelItem(trwDT):
     return trwDT.topLevelItem(trwDT.topLevelItemCount()-1)
 
 def populateDTS(trwDT, trwIncludedFiles, filename):
+    left_bracket_count = 0
+    right_bracket_count = 0
+    # 宣告一個存放line的list
+    #line_temp = []
+    lines_dict = {}
 
     # Clear remnants from previously opened file
     trwDT.clear()
@@ -81,11 +90,18 @@ def populateDTS(trwDT, trwIncludedFiles, filename):
             if isDeleted:
                 # remove deleted tag and uncomment content
                 lineContents = lineContents.replace('/* ' + DELETED_TAG + ' */ ', '')
-                lineContents = re.sub('/\*(.*)?\*/\s*', r'\g<1>', lineContents, flags=re.S)
+                lineContents = re.sub(r'/\*(.*)?\*/\s*', r'\g<1>', lineContents, flags=re.S)
 
             # Add line to the list
             rowItem = QtWidgets.QTreeWidgetItem([str(lineNum), lineContents, includedFilename, fileWithLineNums])
             trwDT.addTopLevelItem(rowItem)
+            #line_temp.append(lineContents)
+            lines_dict[lineNum] = lineContents
+
+            if "{" in lineContents:
+                left_bracket_count += 1
+            if "}" in lineContents:
+                right_bracket_count += 1
 
             # Pick a different background color for each filename
             if includedFilename:
@@ -122,6 +138,57 @@ def populateDTS(trwDT, trwIncludedFiles, filename):
                 item.setFont(1, f)
 
             lineNum += 1
+
+        print("count of left brackets = {}, count of right brackets = {}".format(left_bracket_count, right_bracket_count))
+
+        left_Bracket_index = None
+        right_Bracket_index = None
+
+        in_the_end = False
+
+        while not in_the_end:
+            # 產生一個暫存的list，將lines_dict的value轉換成list（不建議用 index 取 key）
+            keys_sorted = sorted(lines_dict.keys())
+            line_temp = [lines_dict[k] for k in keys_sorted]
+
+            right_Bracket_index = None
+            for key in keys_sorted:
+                if "}" in lines_dict[key]:
+                    right_Bracket_index = key
+                    break
+                if key == keys_sorted[-1]:
+                    in_the_end = True
+                    right_Bracket_index = None
+                    break
+
+            if right_Bracket_index is not None:
+                # 從右括號開始往前找左括號
+                left_Bracket_index = None
+                for k in reversed(keys_sorted):
+                    if k > right_Bracket_index:
+                        continue
+                    if "{" in lines_dict[k]:
+                        left_Bracket_index = k
+                        break
+
+                if left_Bracket_index is not None:
+                    tree_title = lines_dict[left_Bracket_index].replace("{", "").strip()
+
+
+                    print(f"Tree Title: {tree_title}, Lines starting from {left_Bracket_index} to {right_Bracket_index}")
+
+                    # 清除已處理的行
+                    keys_to_delete = [k for k in keys_sorted if left_Bracket_index <= k <= right_Bracket_index]
+                    for k in keys_to_delete:
+                        if k in lines_dict:
+                            del lines_dict[k]
+
+                    left_Bracket_index = None
+                    right_Bracket_index = None
+
+
+
+
 
 def populateIncludedFiles(trwIncludedFiles, dtsFile, inputIncludeDirs):
 
@@ -187,6 +254,62 @@ def center(window):
     # Align current window as per above calculations
     window.move(frameGm.topLeft())
 
+
+class MyDialog(QtWidgets.QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.ui = loadUi("settings.ui", self)
+        self.ui.setWindowTitle("DTV Settings")
+
+
+        self.config = ConfigHelper()
+
+        # 將includeDirStubs轉換為字串用;隔開
+        include_dir_strs = '; '.join(self.config.get_include_dirs())
+        editor = self.config.get_editor()
+        # 去除空格
+        include_dir_strs = include_dir_strs.replace(' ', '')
+        self.ui.lineEdit.setText(include_dir_strs)
+        self.ui.lineEdit_2.setText(editor)
+
+
+        reset_button = self.ui.buttonBox.button(QtWidgets.QDialogButtonBox.StandardButton.Reset)
+        if reset_button: # Check if the button exists
+            reset_button.clicked.connect(self.reset_defaults)
+
+        # Save button
+        accept_button = self.ui.buttonBox.button(QtWidgets.QDialogButtonBox.StandardButton.Save)
+        if accept_button: # Check if the button exists
+            accept_button.clicked.connect(self.ok)
+
+    def reset_defaults(self):
+        print("reset_defaults")
+
+        self.config.load_default_config()
+        self.ui.lineEdit.setText('; '.join(self.config.get_include_dirs()))
+        self.ui.lineEdit_2.setText(self.config.get_editor())
+
+
+
+
+    def ok(self):
+
+        print("ok")
+
+        # 將dirs回存到dtv.conf
+        # 將lineEdit的內容轉換為list
+        dir_str = self.ui.lineEdit.text()
+        dirs = dir_str.split(';')
+        editor = self.ui.lineEdit_2.text()
+
+        self.config.set_include_dirs(dirs)
+        self.config.set_editor(editor)
+        self.config.save_config()
+
+        self.close()
+
+
+
 class main(QMainWindow):
 
 
@@ -200,20 +323,28 @@ class main(QMainWindow):
         self.foundIndex = 0
 
         argc = len(sys.argv)
-        if argc > 1:
-            dts_file = sys.argv[1]
-            if argc == 2:
-                self.openDTSFile(dts_file)
-            else:
-                self.openDTSFile(mergeDts(sys.argv[1:]), dts_file)
+
+        try:
+
+            if argc > 1:
+                dts_file = sys.argv[1]
+                if argc == 2:
+                    self.openDTSFile(dts_file)
+                else:
+                    self.openDTSFile(mergeDts(sys.argv[1:]), dts_file)
+        except Exception as e:
+            print(e)
 
     def openDTSFileUI(self):
 
         fileName, _ = QFileDialog.getOpenFileName(self,
                                                   "Select a DTS file to visualise...",
-                                                  "", "All DTS Files (*.dts)",
+                                                  "", "All DTS Files (*.dts *.dtsi)",
                                                   )
-        self.openDTSFile(fileName)
+        try:
+            self.openDTSFile(fileName)
+        except Exception as e:
+            print(e)
 
     def openDTSFile(self, fileName, baseDtsFileName = None):
 
@@ -242,7 +373,7 @@ class main(QMainWindow):
                 populateDTS(self.ui.trwDT, self.ui.trwIncludedFiles, annotatedTmpDTSFileName)
             except Exception as e:
                 print('EXCEPTION!', e)
-                exit(1)
+                #exit(1)
             finally:
                 # Delete temporary file if created
                 if annotatedTmpDTSFileName:
@@ -326,7 +457,7 @@ class main(QMainWindow):
         # New search string ?
         if findStr != self.findStr:
             self.findStr = findStr
-            self.foundList = self.trwDT.findItems(self.findStr, QtCore.Qt.MatchContains | QtCore.Qt.MatchRecursive, column=1)
+            self.foundList = self.trwDT.findItems(self.findStr, QtCore.Qt.MatchFlag.MatchContains | QtCore.Qt.MatchFlag.MatchRecursive, column=1)
             self.foundIndex = 0
             numFound = len(self.foundList)
         else:
@@ -341,13 +472,24 @@ class main(QMainWindow):
 
         if numFound:
             self.trwDT.setCurrentItem(self.foundList[self.foundIndex])
+            self.trwDT.scrollToItem(self.foundList[self.foundIndex], QtWidgets.QAbstractItemView.ScrollHint.PositionAtCenter)
 
     def showSettings(self):
-        QMessageBox.information(self,
-                            'DTV',
-                            'Settings GUI NOT supported yet.\n'
-                            'Please modify "dtv.conf" using any text editor.',
-                            QMessageBox.StandardButton.Ok)
+        #QMessageBox.information(self,
+        #                    'DTV',
+        #                    'Settings GUI NOT supported yet.\n'
+        #                    'Please modify "dtv.conf" using any text editor.',
+        #                    QMessageBox.StandardButton.Ok)
+
+        #self.settings_ui = loadUi('settings.ui', self)
+
+        dialog = MyDialog()
+        if dialog.exec() == QtWidgets.QDialog.DialogCode.Accepted:
+            print("Dialog accepted")
+        else:
+            print("Dialog rejected")
+
+
         return
 
     def center(self):
@@ -367,6 +509,26 @@ class main(QMainWindow):
         self.ui.btnFindPrev.clicked.connect(self.findTextinDTS)
         self.ui.btnFindNext.clicked.connect(self.findTextinDTS)
         self.ui.txtFindText.returnPressed.connect(self.findTextinDTS)
+
+        #data = {"Project A": ["file_a.py", "file_a.txt", "something.xls"],
+        #        "Project B": ["file_b.csv", "photo.jpg"],
+        #        "Project C": []}
+#
+        #self.ui.testTree.setColumnCount(2)
+        #self.ui.testTree.setHeaderLabels(["Name", "Type"])
+#
+        #items = []
+        #for key, values in data.items():
+        #    item = QTreeWidgetItem([key])
+        #    for value in values:
+        #        ext = value.split(".")[-1].upper()
+        #        child = QTreeWidgetItem([value, ext])
+        #        item.addChild(child)
+        #    items.append(item)
+#
+        #self.ui.testTree.insertTopLevelItems(0, items)
+
+
 
         self.trwDT.setHeaderLabels(['Line No.', 'DTS content ....', 'Source File', 'Full path'])
 
